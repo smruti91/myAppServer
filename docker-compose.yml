@@ -1,0 +1,31 @@
+services:
+  postgresdb:
+    image: pgvector/pgvector:pg17
+    container_name: postgresdb
+    ports:
+      - '5432:5432'
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: LKS
+    volumes:
+      - 'postgres_data:/var/lib/postgresql/data'
+  face-service:
+    build:
+      context: ./face-service
+
+    container_name: face-service
+
+    ports:
+      - "5000:5000"
+
+    environment:
+      PYTHONUNBUFFERED: 1
+
+    restart: unless-stopped
+
+    depends_on:
+      - postgresdb
+
+volumes:
+  postgres_data:
