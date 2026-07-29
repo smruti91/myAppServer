@@ -22,6 +22,21 @@ services:
     environment:
       PYTHONUNBUFFERED: 1
 
+    volumes:
+      # The Dockerfile bakes app.py in with `COPY . .`, so without this mount a
+      # code change only takes effect after `up -d --build`. That is how the
+      # container ended up serving a build that predated /verify and answered
+      # 404 while app.py clearly had the route.
+      - ./face-service:/app
+      # InsightFace downloads buffalo_l (~281 MB) into ~/.insightface on first
+      # use. That lives in the container's writable layer, so every recreate
+      # re-downloads the whole model. A named volume keeps it across rebuilds.
+      - insightface_models:/root/.insightface
+
+    # --reload picks up app.py edits without a rebuild (watchfiles ships with
+    # the uvicorn[standard] extra already in requirements.txt).
+    command: ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "5000", "--reload"]
+
     restart: unless-stopped
 
     depends_on:
@@ -29,3 +44,4 @@ services:
 
 volumes:
   postgres_data:
+  insightface_models:
