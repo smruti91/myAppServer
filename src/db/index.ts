@@ -14,7 +14,9 @@ const pool = new Pool({
   idleTimeoutMillis: 30000,
   connectionTimeoutMillis: 3000,
 });
-
+pool.on('connect', (client) => {
+  client.query("SET TIME ZONE 'Asia/Kolkata'");
+});
 export const db = drizzle(pool, {
   schema,
 });

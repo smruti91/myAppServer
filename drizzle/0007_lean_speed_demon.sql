@@ -1,0 +1,1 @@
+ALTER TABLE "client_locations" ADD COLUMN "site_code" varchar(50);
