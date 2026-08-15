@@ -33,10 +33,14 @@ services:
       # re-downloads the whole model. A named volume keeps it across rebuilds.
       - insightface_models:/root/.insightface
 
-    # --reload picks up app.py edits without a rebuild (watchfiles ships with
-    # the uvicorn[standard] extra already in requirements.txt).
-    command: ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "5000", "--reload"]
-
+      # Scaling: set FACE_WORKERS in your shell or .env to roughly the number of
+    # CPU cores for production — each worker is a separate process, which is the
+    # safe way to parallelise onnxruntime on CPU (each one also holds ~1 GB of
+    # models). The default (unset / 0) keeps the dev loop: a single --reload
+    # worker that picks up app.py edits without a rebuild. For larger fleets,
+    # scale the service instead: docker compose up -d --scale face-service=4
+    # (see server/src/app/utils/pythonSidecar.ts for the client-side pool).
+    command: ["sh", "-c", "if [ \"${FACE_WORKERS:-0}\" = \"0\" ]; then exec uvicorn app:app --host 0.0.0.0 --port 5000 --reload; else exec uvicorn app:app --host 0.0.0.0 --port 5000 --workers ${FACE_WORKERS:-0}; fi"]
     restart: unless-stopped
 
     depends_on:

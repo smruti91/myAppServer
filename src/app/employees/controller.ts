@@ -139,18 +139,19 @@ class EmployeesController {
             }
         
             if (action === 'check-out') {
-            const checkinExists = await db
-                .select({ id: attendanceLogs.id })
-                .from(attendanceLogs)
-                .where(and(
-                eq(attendanceLogs.employeeId, empId),
-                eq(attendanceLogs.action, 'check-in'),
-                sql`DATE(${attendanceLogs.createdAt}) = CURRENT_DATE`
-                ))
-                .limit(1);
-        
-            if (!checkinExists.length)
-                return res.status(409).json({ message: 'Cannot check out without checking in first.' });
+           // Night shifts cross midnight, so "checked in today" is the wrong
+                // gate. A check-out closes the most recent open duty: an open
+                // check-in exists exactly when the latest punch is a check-in
+                // (any later check-out would have closed it).
+                const latest = await db
+                    .select({ action: attendanceLogs.action })
+                    .from(attendanceLogs)
+                    .where(eq(attendanceLogs.employeeId, empId))
+                    .orderBy(desc(attendanceLogs.createdAt))
+                    .limit(1)
+ 
+                if (latest[0]?.action !== 'check-in')
+                    return res.status(409).json({ message: 'Cannot check out without checking in first.' })
             }
         
             // 4. Log attendance
@@ -179,6 +180,155 @@ class EmployeesController {
             }
             console.error('[mark-attendance]', err);
             return res.status(500).json({ message: 'Internal server error', detail: err.message });
+        }
+    }
+
+     /**
+     * Attendance report — one row per duty (a check-in paired with the next
+     * check-out).
+     *
+     * Duties are paired chronologically per employee rather than by calendar
+     * day, so a night shift — check-in 20:00, check-out 06:00 the next
+     * morning — is one row dated by the check-in, with the full duty time.
+     * A check-in with no check-out yet stays open (check-out '—').
+     *
+     * Paginated: the table requests fixed-size pages; omitting `pageSize`
+     * (or sending <= 0) returns every matching row, which the Excel export
+     * uses to dump the full filtered set rather than just the visible page.
+     *
+     * "Distance" is the geodesic distance in metres from the check-in's GPS
+     * fix to its site's geofence centre, computed live rather than stored.
+     * Check-ins recorded without a fix (geo_lat/geo_lng NULL) come back as
+     * null and render as '—'.
+     */
+    public async attendanceReport(req: Request, res: Response){
+        try {
+            const from = (req.query.from as string | undefined)?.trim()
+            const to = (req.query.to as string | undefined)?.trim()
+            const siteId = (req.query.siteId as string | undefined)?.trim()
+            const employeeId = (req.query.employeeId as string | undefined)?.trim()
+ 
+            const pageRaw = Number(req.query.page)
+            const sizeRaw = Number(req.query.pageSize)
+            const page = Number.isInteger(pageRaw) && pageRaw > 0 ? pageRaw : 1
+            const pageSize = Number.isInteger(sizeRaw) && sizeRaw > 0 ? Math.min(sizeRaw, 10000) : null
+ 
+            // Filters shared by the count and the page/export queries. The CTE's
+            // upper bound reaches one extra day past `to` so a night shift whose
+            // check-out lands the next morning still finds its pair; only
+            // check-ins strictly inside [from, to) become rows (emitFilter).
+            // Time formatting and DATE() rely on the DB session's clock
+            // (Asia/Kolkata), same as the punches.
+            const conds = []
+            if (from) conds.push(sql`al.created_at >= ${from}::date`)
+            if (to) conds.push(sql`al.created_at < (${to}::date + interval '2 day')`)
+            if (siteId && idParamModel.safeParse({ id: siteId }).success) conds.push(sql`al.site_id = ${siteId}`)
+            if (employeeId && idParamModel.safeParse({ id: employeeId }).success) conds.push(sql`al.employee_id = ${employeeId}`)
+ 
+            const whereSql = conds.length ? sql`where ${sql.join(conds, sql` and `)}` : sql``
+ 
+            // A row is emitted for a check-in strictly inside the requested
+            // window; check-ins that slipped into the CTE's widened range are
+            // dropped (their check-outs are still available for pairing).
+            const emitFilter = to ? sql`p.created_at < (${to}::date + interval '1 day')` : sql`true`
+ 
+            // Every matching punch in time order per employee; `rn` lets each
+            // check-in look at its immediate successor (see rows query below).
+            const punchesCte = sql`
+                select
+                    al.id,
+                    al.employee_id,
+                    al.site_id,
+                    al.action,
+                    al.created_at,
+                    al.geo_lat,
+                    al.geo_lng,
+                    row_number() over (
+                        partition by al.employee_id
+                        order by al.created_at
+                    ) as rn
+                from attendance_logs al
+                ${whereSql}
+            `
+ 
+            // Only the paged view needs the total; the export path skips the
+            // extra round trip and reports the rows it actually got.
+            let total = 0
+            if (pageSize) {
+                const tally = await db.execute<{ count: number }>(sql`
+                    with punches as (${punchesCte})
+                    select count(*)::int as count
+                    from punches p
+                    where p.action = 'check-in' and ${emitFilter}
+                `)
+                total = tally.rows[0]?.count ?? 0
+            }
+ 
+            const rows = await db.execute<DailyReportRow>(sql`
+                with punches as (${punchesCte})
+                select
+                    ci.id,
+                    concat(e.first_name, ' ', e.last_name) as "employeeName",
+                    s.site_name as "siteName",
+                    to_char(ci.check_in_at, 'YYYY-MM-DD') as "createdAtDateOnly",
+                    to_char(ci.check_in_at, 'HH24:MI:SS') as "checkIn",
+                    to_char(ci.check_out_at, 'HH24:MI:SS') as "checkOut",
+                    -- Duty time = check-out minus check-in, spanning midnight for
+                    -- night shifts. Interval, so the gap between 20:00 and 06:00
+                    -- is correctly 10 hours, not -14.
+                    to_char(ci.check_out_at - ci.check_in_at, 'HH24:MI:SS') as "dutyTime",
+                    round(
+                        6371000 * 2 * asin(sqrt(
+                            power(sin((radians(s.latitude) - radians(ci.geo_lat)) / 2), 2)
+                            + cos(radians(ci.geo_lat)) * cos(radians(s.latitude))
+                            * power(sin((radians(s.longitude) - radians(ci.geo_lng)) / 2), 2)
+                        ))
+                    )::double precision as "distanceM"
+                from (
+                    -- Pair each check-in with the very next punch; the join keeps
+                    -- it only when that next punch is a check-out, so consecutive
+                    -- check-ins (an anomaly) leave the earlier one open.
+                    select
+                        p.id,
+                        p.employee_id,
+                        p.site_id,
+                        p.created_at as check_in_at,
+                        p.geo_lat,
+                        p.geo_lng,
+                        co.created_at as check_out_at
+                    from punches p
+                    left join punches co
+                        on co.employee_id = p.employee_id
+                        and co.rn = p.rn + 1
+                        and co.action = 'check-out'
+                    where p.action = 'check-in' and ${emitFilter}
+                ) ci
+                join employees e on e.id = ci.employee_id
+                left join sites s on s.id = ci.site_id
+                order by ci.check_in_at desc, e.first_name, e.last_name, ci.employee_id
+                ${pageSize ? sql`limit ${pageSize} offset ${(page - 1) * pageSize}` : sql``}
+            `)
+ 
+            if (!pageSize) total = rows.rows.length
+ 
+            res.json({
+                success: true,
+                data: {
+                    rows: rows.rows,
+                    pagination: {
+                        page,
+                        pageSize: pageSize ?? rows.rows.length,
+                        total,
+                        totalPages: pageSize ? Math.max(1, Math.ceil(total / pageSize)) : 1,
+                    },
+                },
+            })
+        } catch (error: any) {
+            console.error('[attendance-report]', error)
+            // drizzle wraps DB failures in a "Query failed: …" message that dumps
+            // the SQL — useless to an admin. The real Postgres error is on .cause.
+            const detail = error?.cause?.message ?? error?.message
+            res.status(500).json({ success: false, message: detail || 'Internal Server Error' })
         }
     }
 
@@ -1022,6 +1172,18 @@ class EmployeesController {
         }
     }
 
+}
+/** One row of the daily attendance summary — a single employee's day. */
+interface DailyReportRow {
+    id: string
+    employeeName: string
+    siteName: string | null
+    createdAtDateOnly: string
+    checkIn: string | null
+    checkOut: string | null
+    dutyTime: string | null
+    distanceM: number | null
+    [key: string]: unknown
 }
 
 export default EmployeesController

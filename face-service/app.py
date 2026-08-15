@@ -1,4 +1,6 @@
 import json
+import os
+import threading
 from fastapi import FastAPI, UploadFile, Form
 from PIL import Image
 import numpy as np
@@ -19,6 +21,15 @@ model.prepare(
 # MiniFAS anti-spoofing model (facenox/face-antispoof-onnx)
 liveness = LivenessModel()
 
+# Concurrency cap per process. InsightFace + MiniFAS run on CPU, and letting a
+# uvicorn thread pool hit every core at once just thrashes the scheduler — a
+# small bound (default 2, tune via FACE_INFER_CONCURRENCY) keeps each inference
+# fast. Real parallelism comes from running more uvicorn WORKERS (one process
+# per core), which is also the safe way to run onnxruntime.
+_infer_semaphore = threading.BoundedSemaphore(
+    max(1, int(os.environ.get("FACE_INFER_CONCURRENCY", "2")))
+)
+
 
 def load_rgb(file: UploadFile) -> np.ndarray:
     """Read an uploaded image as a uint8 RGB array (matches InsightFace input)."""
@@ -26,9 +37,17 @@ def load_rgb(file: UploadFile) -> np.ndarray:
     return np.array(image)
 
 
-def check_liveness(img: np.ndarray, bbox, probability_threshold: float) -> dict:
-    """Run anti-spoofing on the detected face. bbox = [x1, y1, x2, y2]."""
-    return liveness.predict(img, bbox, probability_threshold)
+def process_face(img: np.ndarray, liveness_threshold: float):
+    """Detect a face and run liveness, both under the concurrency cap.
+
+    Returns (face, liveness_result), or (None, None) when no face is found.
+    """
+    with _infer_semaphore:
+        faces = model.get(img)
+        if not faces:
+            return None, None
+        face = faces[0]
+        return face, liveness.predict(img, face.bbox, liveness_threshold)
 
 
 @app.get("/health")
@@ -39,7 +58,7 @@ def health():
 
 
 @app.post("/liveness")
-async def liveness_check(
+def liveness_check(
     file: UploadFile,
     threshold: float = Form(0.5),
 ):
@@ -50,8 +69,8 @@ async def liveness_check(
     """
     img = load_rgb(file)
 
-    faces = model.get(img)
-    if not faces:
+    face, result = process_face(img, threshold)
+    if face is None:
         return {
             "success": False,
             "is_real": False,
@@ -59,13 +78,12 @@ async def liveness_check(
             "message": "No face detected",
         }
 
-    result = check_liveness(img, faces[0].bbox, threshold)
     result["success"] = True
     return result
 
 
 @app.post("/embedding")
-async def embedding(
+def embedding(
     file: UploadFile,
     require_liveness: bool = Form(True),
     threshold: float = Form(0.5),
@@ -77,14 +95,12 @@ async def embedding(
     """
     img = load_rgb(file)
 
-    faces = model.get(img)
-    if not faces:
+    face, result = process_face(img, threshold)
+    if face is None:
         return {
             "success": False,
             "message": "No face detected"
         }
-
-    result = check_liveness(img, faces[0].bbox, threshold)
 
     if require_liveness and not result["is_real"]:
         return {
@@ -95,13 +111,13 @@ async def embedding(
 
     return {
         "success": True,
-        "embedding": faces[0].embedding.tolist(),
+        "embedding": face.embedding.tolist(),
         "liveness": result,
     }
 
 
 @app.post("/verify")
-async def verify(
+def verify(
     file: UploadFile,
     stored_embedding: str = Form(...),
     threshold: float = Form(0.40),
@@ -122,11 +138,9 @@ async def verify(
 
     img = load_rgb(file)
 
-    faces = model.get(img)
-    if not faces:
+    face, result = process_face(img, liveness_threshold)
+    if face is None:
         return {"success": False, "verified": False, "message": "No face detected"}
-
-    result = check_liveness(img, faces[0].bbox, liveness_threshold)
 
     if require_liveness and not result["is_real"]:
         return {
@@ -138,7 +152,7 @@ async def verify(
             "liveness": result,
         }
 
-    live = faces[0].embedding.astype(np.float32)
+    live = face.embedding.astype(np.float32)
 
     # Cosine distance = 1 - cosine similarity
     a = live / (np.linalg.norm(live) + 1e-12)

@@ -34,3 +34,4 @@ empRouter.patch('/site/:id', employeeController.updateSite.bind(employeeControll
 empRouter.delete('/site/:id', employeeController.deleteSite.bind(employeeController) )
 empRouter.post('/assign-site', employeeController.assignSiteToEmployee.bind(employeeController) )
 empRouter.post('/attendance/mark', employeeController.handleattendanceMark.bind(employeeController) )
+empRouter.get('/attendance/report', employeeController.attendanceReport.bind(employeeController) )
