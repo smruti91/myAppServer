@@ -142,3 +142,13 @@ dist
 vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
 .vite/
+
+# Face-enrolment photos written at runtime — user data, not source.
+uploads/
+__pycache__/
+*.py[cod]
+*$py.class
+
+.env
+venv/
+.venv/

@@ -19,3 +19,8 @@ export const registerByPhoneModel = z.object({
     .regex(/^[6-9]\d{9}$/, 'Invalid mobile number'),
 });
 
+export const adminSignInModel = z.object({
+  phone: z.string().min(10).max(15),
+  password: z.string().min(5),
+});
+

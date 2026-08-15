@@ -1,0 +1,1 @@
+ALTER TABLE "employees" ADD COLUMN "image_path" varchar(255);

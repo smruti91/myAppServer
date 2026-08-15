@@ -15,6 +15,7 @@
   "author": "",
   "license": "ISC",
   "devDependencies": {
+    "@types/cookie-parser": "^1.4.10",
     "@types/express": "^5.0.6",
     "@types/jsonwebtoken": "^9.0.10",
     "@types/node": "^25.5.0",
@@ -24,15 +25,19 @@
     "tsx": "^4.21.0"
   },
   "dependencies": {
+    "@tensorflow/tfjs": "^4.22.0",
     "@types/cors": "^2.8.19",
+    "@types/multer": "^2.2.0",
     "@vladmandic/face-api": "^1.7.15",
     "canvas": "^3.2.3",
+    "cookie-parser": "^1.4.7",
     "cors": "^2.8.6",
     "dotenv": "^17.3.1",
     "drizzle-orm": "^0.45.2",
     "express": "^5.2.1",
     "form-data": "^4.0.6",
     "jsonwebtoken": "^9.0.3",
+    "multer": "^2.2.0",
     "node-fetch": "^3.3.2",
     "pg": "^8.20.0",
     "zod": "^4.3.6"
